@@ -1,54 +1,79 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha1"
 	"encoding/base64"
-	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 )
 
+const WEBSOCKETGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-func calcKey(clientKey string) string {
-	clientKey = strings.Trim(clientKey, " ") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	hash := sha1.Sum(([]byte(clientKey)))
+func getEnvOrDefault(key, defaultValue string) string {
+		value := os.Getenv(key)
+		if value == "" {
+			return defaultValue
+		}
+		return value
+	}
+func calculateWebSocketAccept(SecWebSocketKey string) string {
+	SecWebSocketKey = strings.Trim(SecWebSocketKey, " ") + WEBSOCKETGUID
+	hash := sha1.Sum([]byte(SecWebSocketKey))
 	return base64.StdEncoding.EncodeToString(hash[:])
 }
-func handler(w http.ResponseWriter, req *http.Request) {
-	wsKey := getWSKey(req)
-	calcKey(wsKey)
-	hj, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "webserver doesn't support hijacking", http.StatusInternalServerError)
-			return
+func handleWebSocket(conn net.Conn, rwBuffer *bufio.ReadWriter) {
+	defer conn.Close()
+
+	for {
+		bytesToRead := rwBuffer.Reader.Buffered()
+		log.Println(string(bytesToRead))
+
+		if bytesToRead > 0 {
+			data, isPrefix, err := rwBuffer.Reader.ReadLine()
+			if err != nil {
+				log.Println("ssss"+err.Error())
+			} else {
+				log.Println("cccccc"+string(data), isPrefix)
+			}
 		}
-		conn, bufrw, err := hj.Hijack()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		// Don't forget to close the connection:
-		defer conn.Close()
-		bufrw.WriteString("Now we're speaking raw TCP. Say hi: ")
-		bufrw.Flush()
-		s, err := bufrw.ReadString('\n')
-		if err != nil {
-			log.Printf("error reading string: %v", err)
-			return
-		}
-		fmt.Fprintf(bufrw, "You said: %q\nBye.\n", s)
-		bufrw.Flush()
+	}
 
 }
+func handleUpgradeRequest(w http.ResponseWriter, req *http.Request) {
+	responseKey := calculateWebSocketAccept(req.Header.Get("Sec-Websocket-Key"))
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "webserver doesn't support hijacking", http.StatusInternalServerError)
+		return
+	}
+	conn, rwBuffer, err := hj.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
 
-func getWSKey(req *http.Request) string {
-	return req.Header.Get("Sec-Websocket-Key")
+	// Write the WebSocket handshake response manually
+	handshakeResponse := []byte(
+		"HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: " + responseKey + "\r\n\r\n")
+	_, err = conn.Write(handshakeResponse)
+	if err != nil {
+		log.Printf("Error writing WebSocket handshake response: %v", err)
+		return
+	}
+	go handleWebSocket(conn, rwBuffer)
+
 }
 
 func main() {
 	log.Print("Server Started")
-
-	http.HandleFunc("/", handler)
-	http.ListenAndServe(":5555", nil)
+	http.HandleFunc("/", handleUpgradeRequest)
+	log.Fatal(http.ListenAndServe(":"+getEnvOrDefault("PORT", "5555"), nil))
 }
